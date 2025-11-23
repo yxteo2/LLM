@@ -5,6 +5,7 @@ export interface BoundingBox {
   ymax: number;
   xmax: number;
   confidence?: number;
+  type?: 'object' | 'text';
 }
 
 export interface DetectionResult {

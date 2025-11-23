@@ -5,7 +5,7 @@ import ChatArea from './components/ChatArea';
 import ToolSidebar from './components/ToolSidebar';
 import ImageViewer from './components/ImageViewer';
 import { Message, Sender, ToolLog, BoundingBox } from './types';
-import { createChatSession, processImage, executeObjectDetection } from './services/geminiService';
+import { createChatSession, processImage, runDinoV3, runOCR } from './services/geminiService';
 
 const App: React.FC = () => {
   // --- State ---
@@ -18,13 +18,15 @@ const App: React.FC = () => {
   
   const chatSessionRef = useRef<Chat | null>(null);
 
-  // Initialize Chat Session
+  // Initialize Chat Session (The Orchestrator)
   useEffect(() => {
     chatSessionRef.current = createChatSession(
-      "You are a helpful visual assistant equipped with machine vision tools. " +
-      "If the user asks to find, count, or locate objects, use the 'detect_objects' tool. " +
-      "When the tool returns data, summarize what you see naturally. " +
-      "Do NOT invent coordinates yourself; rely on the tool."
+      "You are the Visionary Orchestrator, an AI Agent designed to coordinate specialized machine vision models. " +
+      "You DO NOT have eyes. To see the world, you must use your tools:\n" +
+      "1. `dino_v3_detect`: Uses the powerful DinoV3 model for object detection and counting.\n" +
+      "2. `ocr_engine`: Uses a dedicated OCR model to read text.\n" +
+      "Always verify visually by calling a tool before answering questions about the image content. " +
+      "When tools return JSON data, synthesize it into a natural, helpful response for the user."
     );
   }, []);
 
@@ -32,24 +34,18 @@ const App: React.FC = () => {
 
   const handleImageUpload = async (file: File) => {
     try {
-        // Process image to ensure it is in a supported format (e.g. converts AVIF to JPEG)
         const { base64, mimeType } = await processImage(file);
-        
-        // Create a local URL for the UI display (browser can usually display the original file even if API can't)
         const url = URL.createObjectURL(file);
 
         setCurrentImage(url);
         setCurrentImageBase64({ data: base64, mime: mimeType });
-        setDetections([]); // Clear previous detections
+        setDetections([]); 
         setMessages(prev => [...prev, {
             id: uuidv4(),
             sender: Sender.System,
             text: `Image uploaded: ${file.name}`,
             timestamp: new Date()
         }]);
-
-        // Reset chat history for new image context (Optional, but usually cleaner for single-image vision tasks)
-        // For now, we keep history but system prompt implies current image focus.
     } catch (error) {
         console.error("File upload error", error);
         setMessages(prev => [...prev, {
@@ -76,15 +72,9 @@ const App: React.FC = () => {
 
     try {
       // 2. Prepare payload
-      // If we have an image, we should probably send it in the turn if it's new, 
-      // or just rely on the tool execution to use the "current" image state.
-      // However, Gemini Chat needs the image in the history to "talk" about it generally.
-      // We will send the image data + text in this turn.
-      
+      // Note: We send the image to the Orchestrator as context, but prompt implies it should use tools for specific tasks.
       let response;
-      
       if (currentImageBase64) {
-          // Sending image + text
           response = await chatSessionRef.current.sendMessage({
               message: [
                   { inlineData: { data: currentImageBase64.data, mimeType: currentImageBase64.mime } },
@@ -92,73 +82,89 @@ const App: React.FC = () => {
               ]
           });
       } else {
-          // Just text
           response = await chatSessionRef.current.sendMessage({ message: text });
       }
 
-      // 3. Handle Tool Calls Loop
+      // 3. Handle Tool Calls Loop (The MCP Flow)
       let functionCalls = response.functionCalls;
       
-      // While the model wants to call tools...
       while (functionCalls && functionCalls.length > 0) {
-        const fc = functionCalls[0]; // Handle first call (simplification)
-        const toolLogId = uuidv4();
-        
-        // Log Tool Start
-        const argsStr = JSON.stringify(fc.args);
-        setToolLogs(prev => [...prev, {
-            id: toolLogId,
-            toolName: fc.name,
-            status: 'pending',
-            args: argsStr,
-            timestamp: new Date()
-        }]);
+        const functionResponses = [];
+        const newDetections: BoundingBox[] = [];
 
-        // Execute Tool
-        let toolResult: any;
-        if (fc.name === 'detect_objects') {
+        for (const fc of functionCalls) {
+            const toolLogId = uuidv4();
+            const argsStr = JSON.stringify(fc.args);
+            
+            setToolLogs(prev => [...prev, {
+                id: toolLogId,
+                toolName: fc.name,
+                status: 'pending',
+                args: argsStr,
+                timestamp: new Date()
+            }]);
+
+            let toolResult: any;
+            
             if (!currentImageBase64) {
-                toolResult = { error: "No image available to analyze." };
+                toolResult = { error: "No image context available for vision tool." };
             } else {
-                // Execute actual vision task
-                const targetObjects = (fc.args as any).target_objects;
-                const boxes = await executeObjectDetection(
-                    currentImageBase64.data, 
-                    currentImageBase64.mime,
-                    targetObjects
-                );
-                
-                setDetections(boxes); // Update UI Overlay
-                toolResult = { 
-                    status: "success", 
-                    found_count: boxes.length, 
-                    objects: boxes.map(b => `${b.label} at [${b.ymin.toFixed(2)}, ${b.xmin.toFixed(2)}]`) 
-                };
+                // Route to Specialized Models
+                if (fc.name === 'dino_v3_detect') {
+                    const targetObjects = (fc.args as any).target_objects;
+                    const boxes = await runDinoV3(
+                        currentImageBase64.data, 
+                        currentImageBase64.mime,
+                        targetObjects
+                    );
+                    newDetections.push(...boxes);
+                    toolResult = { 
+                        status: "success", 
+                        model: "DinoV3-Large",
+                        found_count: boxes.length, 
+                        objects: boxes.map(b => `${b.label} at [${b.ymin.toFixed(2)}, ${b.xmin.toFixed(2)}]`) 
+                    };
+                } else if (fc.name === 'ocr_engine') {
+                    const boxes = await runOCR(
+                        currentImageBase64.data,
+                        currentImageBase64.mime
+                    );
+                    newDetections.push(...boxes);
+                    toolResult = {
+                        status: "success",
+                        model: "Tesseract-Ensemble",
+                        text_blocks_found: boxes.length,
+                        content: boxes.map(b => `"${b.label}" at [${b.ymin.toFixed(2)}, ${b.xmin.toFixed(2)}]`).join(' | ')
+                    };
+                } else {
+                    toolResult = { error: `Tool ${fc.name} not found in registry.` };
+                }
             }
-        } else {
-            toolResult = { error: "Unknown tool" };
-        }
 
-        // Log Tool Success
-        setToolLogs(prev => prev.map(log => 
-            log.id === toolLogId ? { ...log, status: 'success', result: JSON.stringify(toolResult) } : log
-        ));
+            setToolLogs(prev => prev.map(log => 
+                log.id === toolLogId ? { ...log, status: 'success', result: JSON.stringify(toolResult) } : log
+            ));
 
-        // Send Tool Response back to model
-        response = await chatSessionRef.current.sendMessage({
-            message: [{
+            functionResponses.push({
                 functionResponse: {
                     name: fc.name,
                     response: { result: toolResult }
                 }
-            }]
+            });
+        }
+
+        if (newDetections.length > 0) {
+            setDetections(newDetections);
+        }
+
+        response = await chatSessionRef.current.sendMessage({
+            message: functionResponses
         });
         
-        // Check if model wants to call more tools
         functionCalls = response.functionCalls;
       }
 
-      // 4. Final Text Response
+      // 4. Final Response
       const modelText = response.text;
       if (modelText) {
           setMessages(prev => [...prev, {
@@ -174,7 +180,7 @@ const App: React.FC = () => {
       setMessages(prev => [...prev, {
           id: uuidv4(),
           sender: Sender.System,
-          text: "Error communicating with the agent. Please try again.",
+          text: "Communication error with agent swarm.",
           timestamp: new Date()
       }]);
     } finally {
@@ -187,20 +193,21 @@ const App: React.FC = () => {
       {/* Header */}
       <header className="h-14 border-b border-slate-800 bg-slate-900/50 flex items-center px-6 justify-between shrink-0">
         <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold shadow-lg shadow-cyan-500/20">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-500/20">
                 V
             </div>
-            <h1 className="font-bold text-lg tracking-tight">Visionary <span className="text-slate-500 font-normal text-sm">| MCP Agent</span></h1>
+            <h1 className="font-bold text-lg tracking-tight">Visionary <span className="text-slate-500 font-normal text-sm">| MCP Orchestrator</span></h1>
         </div>
-        <div className="text-xs text-slate-500 font-mono">
-            Powered by Gemini 2.5 Flash
+        <div className="flex gap-4 text-[10px] font-mono text-slate-500">
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>DinoV3 Active</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>OCR Engine Active</span>
         </div>
       </header>
 
-      {/* Main Content Layout */}
+      {/* Main Layout */}
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         
-        {/* Left: Chat */}
+        {/* Chat Interface */}
         <div className="flex-1 flex flex-col min-w-0 order-2 md:order-1">
             <ChatArea 
                 messages={messages} 
@@ -211,12 +218,12 @@ const App: React.FC = () => {
             />
         </div>
 
-        {/* Right: Visual Context & Tools */}
+        {/* Visual Tools Panel */}
         <div className="w-full md:w-[450px] lg:w-[500px] flex flex-col border-l border-slate-800 bg-slate-925 order-1 md:order-2 shrink-0">
-            {/* Top Half: Image Viewer */}
             <div className="h-[40vh] md:h-1/2 flex flex-col">
-                <div className="p-2 bg-slate-900 border-b border-slate-800 text-xs font-bold text-slate-400 uppercase tracking-wider pl-4">
-                    Visual Context
+                <div className="p-2 bg-slate-900 border-b border-slate-800 text-xs font-bold text-slate-400 uppercase tracking-wider pl-4 flex justify-between">
+                    <span>Visual Context</span>
+                    <span className="text-xs text-slate-600 font-mono normal-case">Live Feed</span>
                 </div>
                 <div className="flex-1 overflow-hidden relative bg-black">
                      <ImageViewer 
@@ -227,7 +234,6 @@ const App: React.FC = () => {
                 </div>
             </div>
 
-            {/* Bottom Half: Tool Logs */}
             <div className="flex-1 h-[40vh] md:h-1/2 min-h-0 border-t border-slate-800">
                 <ToolSidebar logs={toolLogs} />
             </div>

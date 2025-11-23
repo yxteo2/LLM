@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, FunctionDeclaration, Schema, Chat, GenerateContentResponse, Part } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Chat } from "@google/genai";
 import { BoundingBox } from "../types";
 
 // Initialize the API client
@@ -100,5 +100,51 @@ export const convertBlobToBase64 = (blob: Blob): Promise<string> => {
     };
     reader.onerror = reject;
     reader.readAsDataURL(blob);
+  });
+};
+
+// Helper to process image and ensure compatibility (e.g. converting AVIF to JPEG)
+export const processImage = async (file: File): Promise<{ base64: string; mimeType: string }> => {
+  // Types directly supported by Gemini
+  const supportedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+  
+  if (supportedTypes.includes(file.type)) {
+    const base64 = await convertBlobToBase64(file);
+    return { base64, mimeType: file.type };
+  }
+
+  // Conversion logic for unsupported types (like avif, gif, etc.)
+  // We draw to canvas and export as JPEG
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not get canvas context'));
+        return;
+      }
+      // Draw image to canvas
+      ctx.drawImage(img, 0, 0);
+      
+      // Convert to JPEG
+      const jpegUrl = canvas.toDataURL('image/jpeg', 0.9);
+      const base64 = jpegUrl.split(',')[1];
+      
+      URL.revokeObjectURL(url);
+      resolve({ base64, mimeType: 'image/jpeg' });
+    };
+    
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    
+    img.src = url;
   });
 };

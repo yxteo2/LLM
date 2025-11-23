@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { Chat, Part, ToolCallPart, FunctionCall } from '@google/genai';
+import { Chat } from '@google/genai';
 import ChatArea from './components/ChatArea';
 import ToolSidebar from './components/ToolSidebar';
 import ImageViewer from './components/ImageViewer';
 import { Message, Sender, ToolLog, BoundingBox } from './types';
-import { createChatSession, convertBlobToBase64, executeObjectDetection } from './services/geminiService';
+import { createChatSession, processImage, executeObjectDetection } from './services/geminiService';
 
 const App: React.FC = () => {
   // --- State ---
@@ -32,12 +32,14 @@ const App: React.FC = () => {
 
   const handleImageUpload = async (file: File) => {
     try {
-        const base64 = await convertBlobToBase64(file);
-        const mime = file.type;
+        // Process image to ensure it is in a supported format (e.g. converts AVIF to JPEG)
+        const { base64, mimeType } = await processImage(file);
+        
+        // Create a local URL for the UI display (browser can usually display the original file even if API can't)
         const url = URL.createObjectURL(file);
 
         setCurrentImage(url);
-        setCurrentImageBase64({ data: base64, mime });
+        setCurrentImageBase64({ data: base64, mime: mimeType });
         setDetections([]); // Clear previous detections
         setMessages(prev => [...prev, {
             id: uuidv4(),
@@ -50,6 +52,12 @@ const App: React.FC = () => {
         // For now, we keep history but system prompt implies current image focus.
     } catch (error) {
         console.error("File upload error", error);
+        setMessages(prev => [...prev, {
+            id: uuidv4(),
+            sender: Sender.System,
+            text: `Error processing image: ${error}`,
+            timestamp: new Date()
+        }]);
     }
   };
 

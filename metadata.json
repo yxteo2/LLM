@@ -1,0 +1,5 @@
+{
+  "name": "Visionary - MCP Vision Agent",
+  "description": "A Model Context Protocol (MCP) inspired agent that uses Gemini 2.5 to orchestrate machine vision tools like object detection and spatial analysis.",
+  "requestFramePermissions": []
+}

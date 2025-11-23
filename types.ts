@@ -37,5 +37,7 @@ export interface ToolLog {
 
 export interface AnalysisState {
   isAnalyzing: boolean;
-  stage: string; // e.g., "Thinking...", "Calling Tool: detect_objects", "Rendering..."
+  stage: string; 
 }
+
+export type ModelStatus = 'idle' | 'loading' | 'ready';

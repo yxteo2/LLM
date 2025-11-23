@@ -4,8 +4,9 @@ import { Chat } from '@google/genai';
 import ChatArea from './components/ChatArea';
 import ToolSidebar from './components/ToolSidebar';
 import ImageViewer from './components/ImageViewer';
-import { Message, Sender, ToolLog, BoundingBox } from './types';
+import { Message, Sender, ToolLog, BoundingBox, ModelStatus } from './types';
 import { createChatSession, processImage, runDinoV3, runOCR } from './services/geminiService';
+import { initVisionModel, getModelStatus } from './services/visionService';
 
 const App: React.FC = () => {
   // --- State ---
@@ -15,18 +16,27 @@ const App: React.FC = () => {
   const [currentImage, setCurrentImage] = useState<string | null>(null);
   const [currentImageBase64, setCurrentImageBase64] = useState<{data: string, mime: string} | null>(null);
   const [detections, setDetections] = useState<BoundingBox[]>([]);
+  const [modelStatus, setModelStatus] = useState<ModelStatus>('idle');
   
   const chatSessionRef = useRef<Chat | null>(null);
 
-  // Initialize Chat Session (The Orchestrator)
+  // Initialize Chat Session & Preload Model
   useEffect(() => {
+    // Preload the local model
+    const loadModel = async () => {
+        setModelStatus('loading');
+        await initVisionModel();
+        setModelStatus('ready');
+    };
+    loadModel();
+
     chatSessionRef.current = createChatSession(
-      "You are the Visionary Orchestrator, an AI Agent designed to coordinate specialized machine vision models. " +
-      "You DO NOT have eyes. To see the world, you must use your tools:\n" +
-      "1. `dino_v3_detect`: Uses the powerful DinoV3 model for object detection and counting.\n" +
-      "2. `ocr_engine`: Uses a dedicated OCR model to read text.\n" +
-      "Always verify visually by calling a tool before answering questions about the image content. " +
-      "When tools return JSON data, synthesize it into a natural, helpful response for the user."
+      "You are the Visionary Orchestrator. You are an AI Agent that coordinates specialized machine vision models.\n" +
+      "Important: You are NOT the vision model. You are the manager.\n" +
+      "To see detection data, you MUST call `dino_v3_detect`.\n" +
+      "To read text, you MUST call `ocr_engine`.\n" +
+      "The `dino_v3_detect` tool uses a local DETR (Transformer) model. It detects common objects (person, car, dog, bottle, etc).\n" +
+      "Do not guess what is in the image. Use your tools."
     );
   }, []);
 
@@ -72,7 +82,6 @@ const App: React.FC = () => {
 
     try {
       // 2. Prepare payload
-      // Note: We send the image to the Orchestrator as context, but prompt implies it should use tools for specific tasks.
       let response;
       if (currentImageBase64) {
           response = await chatSessionRef.current.sendMessage({
@@ -85,7 +94,7 @@ const App: React.FC = () => {
           response = await chatSessionRef.current.sendMessage({ message: text });
       }
 
-      // 3. Handle Tool Calls Loop (The MCP Flow)
+      // 3. Handle Tool Calls Loop
       let functionCalls = response.functionCalls;
       
       while (functionCalls && functionCalls.length > 0) {
@@ -106,38 +115,46 @@ const App: React.FC = () => {
 
             let toolResult: any;
             
-            if (!currentImageBase64) {
+            if (!currentImage) {
                 toolResult = { error: "No image context available for vision tool." };
             } else {
-                // Route to Specialized Models
                 if (fc.name === 'dino_v3_detect') {
+                    // Update Status
+                    if (getModelStatus() !== 'ready') {
+                         setMessages(prev => [...prev, {
+                            id: uuidv4(),
+                            sender: Sender.System,
+                            text: "Downloading Detection Model (approx 50MB)... this happens only once.",
+                            timestamp: new Date()
+                        }]);
+                    }
+
                     const targetObjects = (fc.args as any).target_objects;
-                    const boxes = await runDinoV3(
-                        currentImageBase64.data, 
-                        currentImageBase64.mime,
-                        targetObjects
-                    );
+                    // PASS THE IMAGE URL directly to the local model service
+                    const boxes = await runDinoV3(currentImage, targetObjects);
+                    
                     newDetections.push(...boxes);
                     toolResult = { 
                         status: "success", 
-                        model: "DinoV3-Large",
+                        backend: "Transformers.js (Local DETR-ResNet-50)",
                         found_count: boxes.length, 
-                        objects: boxes.map(b => `${b.label} at [${b.ymin.toFixed(2)}, ${b.xmin.toFixed(2)}]`) 
+                        objects: boxes.map(b => `${b.label} (${(b.confidence! * 100).toFixed(0)}%) at [${b.xmin.toFixed(0)},${b.ymin.toFixed(0)}]`) 
                     };
                 } else if (fc.name === 'ocr_engine') {
-                    const boxes = await runOCR(
-                        currentImageBase64.data,
-                        currentImageBase64.mime
-                    );
-                    newDetections.push(...boxes);
-                    toolResult = {
-                        status: "success",
-                        model: "Tesseract-Ensemble",
-                        text_blocks_found: boxes.length,
-                        content: boxes.map(b => `"${b.label}" at [${b.ymin.toFixed(2)}, ${b.xmin.toFixed(2)}]`).join(' | ')
-                    };
-                } else {
-                    toolResult = { error: `Tool ${fc.name} not found in registry.` };
+                     // Pass base64 for Gemini-based OCR
+                     if (currentImageBase64) {
+                        const boxes = await runOCR(
+                            currentImageBase64.data,
+                            currentImageBase64.mime
+                        );
+                        newDetections.push(...boxes);
+                        toolResult = {
+                            status: "success",
+                            backend: "Gemini Vision OCR",
+                            text_blocks_found: boxes.length,
+                            content: boxes.map(b => `"${b.label}"`).join(' | ')
+                        };
+                     }
                 }
             }
 
@@ -154,7 +171,7 @@ const App: React.FC = () => {
         }
 
         if (newDetections.length > 0) {
-            setDetections(newDetections);
+            setDetections(prev => [...prev, ...newDetections]);
         }
 
         response = await chatSessionRef.current.sendMessage({
@@ -180,7 +197,7 @@ const App: React.FC = () => {
       setMessages(prev => [...prev, {
           id: uuidv4(),
           sender: Sender.System,
-          text: "Communication error with agent swarm.",
+          text: "Agent Error: " + (error instanceof Error ? error.message : String(error)),
           timestamp: new Date()
       }]);
     } finally {
@@ -198,9 +215,15 @@ const App: React.FC = () => {
             </div>
             <h1 className="font-bold text-lg tracking-tight">Visionary <span className="text-slate-500 font-normal text-sm">| MCP Orchestrator</span></h1>
         </div>
-        <div className="flex gap-4 text-[10px] font-mono text-slate-500">
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>DinoV3 Active</span>
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>OCR Engine Active</span>
+        <div className="flex gap-4 text-[10px] font-mono text-slate-500 items-center">
+            <div className="flex items-center gap-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${modelStatus === 'ready' ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]' : modelStatus === 'loading' ? 'bg-yellow-500 animate-pulse' : 'bg-slate-600'}`}></span>
+                {modelStatus === 'loading' ? 'Loading DETR...' : 'DETR (Local)'}
+            </div>
+            <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></span>
+                OCR (Cloud)
+            </div>
         </div>
       </header>
 

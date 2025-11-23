@@ -1,21 +1,21 @@
 import { GoogleGenAI, Type, FunctionDeclaration, Chat } from "@google/genai";
 import { BoundingBox } from "../types";
+import { runLocalDetection } from "./visionService";
 
 // Initialize the API client
-// CRITICAL: The API key must be available in process.env.API_KEY
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 // --- Tool Definitions (MCP Capabilities) ---
 
 const dinoV3Tool: FunctionDeclaration = {
   name: 'dino_v3_detect',
-  description: 'Invokes the DinoV3 Open-Vocabulary Detection model to find objects. Returns bounding boxes and labels. Use for finding, counting, or locating specific items.',
+  description: 'Invokes the local Object Detection Model (DETR ResNet-50). Returns bounding boxes and labels for common objects (COCO classes). Use for finding items like cars, people, animals, furniture, etc.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       target_objects: {
         type: Type.STRING,
-        description: 'Comma-separated list of objects to detect (e.g. "cat, dog, remote"). If empty, runs in open-set mode for all prominent objects.',
+        description: 'Optional filter. Comma-separated list of objects to look for. (e.g. "cat, dog").',
       }
     },
   },
@@ -23,82 +23,42 @@ const dinoV3Tool: FunctionDeclaration = {
 
 const ocrTool: FunctionDeclaration = {
   name: 'ocr_engine',
-  description: 'Invokes a specialized Optical Character Recognition (OCR) engine. Returns text content and bounding box coordinates. Use for reading signs, documents, or extracting text.',
+  description: 'Invokes the Optical Character Recognition (OCR) engine. Returns text content and bounding box coordinates.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       focus_area: {
         type: Type.STRING,
-        description: 'Optional hint about what text to look for (e.g., "dates", "prices").',
+        description: 'Optional hint about what text to look for.',
       }
     },
   },
 };
 
-// --- Model Simulation Services ---
+// --- Model Services ---
 
 /**
- * Simulates calling a specialized Object Detection Model (like DinoV3).
- * We use Gemini 2.5 Flash with a strict system prompt to emulate a raw detection API.
+ * Runs the real local Object Detection model via Transformers.js
  */
 export const runDinoV3 = async (
-  base64Image: string, 
-  mimeType: string,
+  imageUrl: string, // Changed to take URL/Blob URL for transformers.js
   targetObjects?: string
 ): Promise<BoundingBox[]> => {
-  
-  // Prompt engineered to act like a raw JSON-outputting vision model
-  const prompt = targetObjects 
-    ? `TASK: Open-Vocabulary Detection. TARGETS: ${targetObjects}. OUTPUT: JSON Bounding Boxes only.` 
-    : `TASK: General Object Detection. TARGETS: All prominent objects. OUTPUT: JSON Bounding Boxes only.`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: {
-      parts: [
-        { inlineData: { data: base64Image, mimeType: mimeType } },
-        { text: prompt }
-      ]
-    },
-    config: {
-      systemInstruction: "You are DinoV3, a specialized computer vision model. You output ONLY JSON. You do not speak. You detect objects.",
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          objects: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                label: { type: Type.STRING },
-                ymin: { type: Type.NUMBER },
-                xmin: { type: Type.NUMBER },
-                ymax: { type: Type.NUMBER },
-                xmax: { type: Type.NUMBER }
-              },
-              required: ['label', 'ymin', 'xmin', 'ymax', 'xmax']
-            }
-          }
-        }
-      }
-    }
-  });
-
-  if (!response.text) return [];
-
   try {
-    const data = JSON.parse(response.text);
-    const objects = data.objects || [];
-    return objects.map((obj: any) => ({ ...obj, type: 'object' }));
+    // Calls the REAL model defined in visionService.ts
+    const boxes = await runLocalDetection(imageUrl, targetObjects);
+    
+    // Normalize coordinates if necessary (Transformers.js usually returns pixel values)
+    // The visualizer handles pixel values correctly if they are > 1.
+    return boxes;
   } catch (e) {
-    console.error("DinoV3 Simulation Failed", e);
+    console.error("Local Vision Model Failed", e);
     return [];
   }
 };
 
 /**
- * Simulates calling a specialized OCR Model.
+ * Uses Gemini's Vision capabilities purely for OCR.
  */
 export const runOCR = async (
   base64Image: string, 
@@ -110,11 +70,10 @@ export const runOCR = async (
     contents: {
       parts: [
         { inlineData: { data: base64Image, mimeType: mimeType } },
-        { text: "TASK: Extract all text. OUTPUT: JSON with text and coordinates." }
+        { text: "Read all text in this image. Return a JSON object with a list of 'text_blocks', where each block has 'text' and bounding box 'ymin', 'xmin', 'ymax', 'xmax' (0-1000 scale)." }
       ]
     },
     config: {
-      systemInstruction: "You are a high-performance OCR Engine. You output ONLY JSON. You extract visible text.",
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
@@ -152,7 +111,7 @@ export const runOCR = async (
       type: 'text'
     }));
   } catch (e) {
-    console.error("OCR Engine Failed", e);
+    console.error("OCR Service Failed", e);
     return [];
   }
 };

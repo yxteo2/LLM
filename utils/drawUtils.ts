@@ -16,17 +16,27 @@ export const drawBoundingBoxes = (
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   boxes.forEach((box, index) => {
-    // Gemini 2.5 often returns coordinates in 0-1000 scale for object detection tasks via JSON
-    // We normalize them to 0-1 first just in case, then scale to image size.
-    
-    // Safety check: if values are small (< 1), treat as 0-1. If > 1, treat as 0-1000.
-    const isNormalized = box.ymax <= 1 && box.xmax <= 1;
-    const scale = isNormalized ? 1 : 1000;
+    let x, y, w, h;
 
-    const x = (box.xmin / scale) * canvas.width;
-    const y = (box.ymin / scale) * canvas.height;
-    const w = ((box.xmax - box.xmin) / scale) * canvas.width;
-    const h = ((box.ymax - box.ymin) / scale) * canvas.height;
+    if (box.coordinateUnit === 'pixel') {
+        // Local models (Transformers.js / Tesseract) return absolute pixels relative to original image size
+        x = box.xmin;
+        y = box.ymin;
+        w = box.xmax - box.xmin;
+        h = box.ymax - box.ymin;
+    } else {
+        // Gemini API usually returns normalized coordinates (0-1000 or 0-1)
+        
+        // Safety check: if values are small (< 1.1), treat as 0-1. If > 1.1, treat as 0-1000.
+        // Using 1.1 to avoid edge cases where a normalized box is exactly 1.0
+        const isNormalized = box.ymax <= 1.1 && box.xmax <= 1.1;
+        const scale = isNormalized ? 1 : 1000;
+
+        x = (box.xmin / scale) * canvas.width;
+        y = (box.ymin / scale) * canvas.height;
+        w = ((box.xmax - box.xmin) / scale) * canvas.width;
+        h = ((box.ymax - box.ymin) / scale) * canvas.height;
+    }
 
     const isText = box.type === 'text';
 
@@ -70,13 +80,11 @@ export const drawBoundingBoxes = (
     // Background
     ctx.fillStyle = isText ? 'rgba(0, 20, 0, 0.8)' : color;
     
-    // Position label above box if space allows, otherwise inside
+    // Position label above box if space allows, otherwise inside/below
     let labelY = y > textHeight ? y - textHeight : y;
-    if (isText) {
-        // For text, sometimes it's better to put it below or offset if crowded, 
-        // but top-left is standard. 
-        // Let's draw a small tag.
-    }
+    
+    // For text, ensure we don't draw off-canvas or block the text itself if possible
+    if (labelY < 0) labelY = y + h; 
     
     ctx.setLineDash([]); // Reset dash for rect
     ctx.fillRect(x, labelY, textWidth, textHeight);

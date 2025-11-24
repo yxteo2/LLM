@@ -7,6 +7,7 @@ import ImageViewer from './components/ImageViewer';
 import { Message, Sender, ToolLog, BoundingBox, ModelStatus } from './types';
 import { createChatSession, processImage, runDinoV3, runOCR } from './services/geminiService';
 import { initVisionModel, getModelStatus } from './services/visionService';
+import { initOCR } from './services/ocrService';
 
 const App: React.FC = () => {
   // --- State ---
@@ -20,15 +21,27 @@ const App: React.FC = () => {
   
   const chatSessionRef = useRef<Chat | null>(null);
 
-  // Initialize Chat Session & Preload Model
+  // Initialize Chat Session & Preload Models
   useEffect(() => {
-    // Preload the local model
-    const loadModel = async () => {
-        setModelStatus('loading');
-        await initVisionModel();
-        setModelStatus('ready');
+    const loadModels = async () => {
+        try {
+            setModelStatus('loading');
+            
+            // Start both in parallel
+            const p1 = initVisionModel();
+            const p2 = initOCR();
+
+            await Promise.all([p1, p2]);
+            
+            setModelStatus('ready');
+        } catch (e) {
+            console.error("Model initialization failed", e);
+            // Reset to idle/error state but don't crash app
+            setModelStatus('idle');
+        }
     };
-    loadModel();
+    
+    loadModels();
 
     chatSessionRef.current = createChatSession(
       "You are the Visionary Orchestrator. You are an AI Agent that coordinates specialized machine vision models.\n" +
@@ -36,9 +49,21 @@ const App: React.FC = () => {
       "To see detection data, you MUST call `dino_v3_detect`.\n" +
       "To read text, you MUST call `ocr_engine`.\n" +
       "The `dino_v3_detect` tool uses a local DETR (Transformer) model. It detects common objects (person, car, dog, bottle, etc).\n" +
+      "The `ocr_engine` uses Tesseract.js to read text.\n" +
       "Do not guess what is in the image. Use your tools."
     );
   }, []);
+
+  const retryModelLoad = async () => {
+      setModelStatus('loading');
+      try {
+          await initVisionModel();
+          setModelStatus('ready');
+      } catch (e) {
+          console.error("Retry failed", e);
+          setModelStatus('idle');
+      }
+  };
 
   // --- Handlers ---
 
@@ -119,12 +144,12 @@ const App: React.FC = () => {
                 toolResult = { error: "No image context available for vision tool." };
             } else {
                 if (fc.name === 'dino_v3_detect') {
-                    // Update Status
+                    // Update Status Check
                     if (getModelStatus() !== 'ready') {
                          setMessages(prev => [...prev, {
                             id: uuidv4(),
                             sender: Sender.System,
-                            text: "Downloading Detection Model (approx 50MB)... this happens only once.",
+                            text: "Initializing Detection Model (Downloading weights ~40MB)...",
                             timestamp: new Date()
                         }]);
                     }
@@ -141,19 +166,18 @@ const App: React.FC = () => {
                         objects: boxes.map(b => `${b.label} (${(b.confidence! * 100).toFixed(0)}%) at [${b.xmin.toFixed(0)},${b.ymin.toFixed(0)}]`) 
                     };
                 } else if (fc.name === 'ocr_engine') {
-                     // Pass base64 for Gemini-based OCR
+                     // Pass base64/URL for OCR
                      if (currentImageBase64) {
-                        const boxes = await runOCR(
-                            currentImageBase64.data,
-                            currentImageBase64.mime
-                        );
+                        const boxes = await runOCR(currentImageBase64.data, currentImageBase64.mime);
                         newDetections.push(...boxes);
                         toolResult = {
                             status: "success",
-                            backend: "Gemini Vision OCR",
+                            backend: "Gemini 2.5 Flash Vision",
                             text_blocks_found: boxes.length,
                             content: boxes.map(b => `"${b.label}"`).join(' | ')
                         };
+                     } else {
+                        toolResult = { error: "Image data unavailable for OCR" };
                      }
                 }
             }
@@ -217,12 +241,14 @@ const App: React.FC = () => {
         </div>
         <div className="flex gap-4 text-[10px] font-mono text-slate-500 items-center">
             <div className="flex items-center gap-1">
-                <span className={`w-1.5 h-1.5 rounded-full ${modelStatus === 'ready' ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]' : modelStatus === 'loading' ? 'bg-yellow-500 animate-pulse' : 'bg-slate-600'}`}></span>
-                {modelStatus === 'loading' ? 'Loading DETR...' : 'DETR (Local)'}
+                <span className={`w-1.5 h-1.5 rounded-full ${modelStatus === 'ready' ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]' : modelStatus === 'loading' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`}></span>
+                {modelStatus === 'loading' ? 'Loading Local Models...' : modelStatus === 'ready' ? 'Models Active' : (
+                    <button onClick={retryModelLoad} className="hover:text-cyan-400 underline">Models Offline (Retry)</button>
+                )}
             </div>
             <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]"></span>
-                OCR (Cloud)
+                Tesseract.js & DETR
             </div>
         </div>
       </header>

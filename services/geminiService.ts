@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type, FunctionDeclaration, Chat } from "@google/genai";
 import { BoundingBox } from "../types";
 import { runLocalDetection } from "./visionService";
+import { runLocalOCR } from "./ocrService";
 
 // Initialize the API client
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -23,7 +24,7 @@ const dinoV3Tool: FunctionDeclaration = {
 
 const ocrTool: FunctionDeclaration = {
   name: 'ocr_engine',
-  description: 'Invokes the Optical Character Recognition (OCR) engine. Returns text content and bounding box coordinates.',
+  description: 'Invokes the local Optical Character Recognition (OCR) engine (Tesseract). Returns text content and bounding box coordinates.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -47,9 +48,6 @@ export const runDinoV3 = async (
   try {
     // Calls the REAL model defined in visionService.ts
     const boxes = await runLocalDetection(imageUrl, targetObjects);
-    
-    // Normalize coordinates if necessary (Transformers.js usually returns pixel values)
-    // The visualizer handles pixel values correctly if they are > 1.
     return boxes;
   } catch (e) {
     console.error("Local Vision Model Failed", e);
@@ -58,62 +56,13 @@ export const runDinoV3 = async (
 };
 
 /**
- * Uses Gemini's Vision capabilities purely for OCR.
+ * Uses Local Tesseract.js for OCR
  */
 export const runOCR = async (
   base64Image: string, 
   mimeType: string
 ): Promise<BoundingBox[]> => {
-  
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: {
-      parts: [
-        { inlineData: { data: base64Image, mimeType: mimeType } },
-        { text: "Read all text in this image. Return a JSON object with a list of 'text_blocks', where each block has 'text' and bounding box 'ymin', 'xmin', 'ymax', 'xmax' (0-1000 scale)." }
-      ]
-    },
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          text_blocks: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                text: { type: Type.STRING },
-                ymin: { type: Type.NUMBER },
-                xmin: { type: Type.NUMBER },
-                ymax: { type: Type.NUMBER },
-                xmax: { type: Type.NUMBER }
-              },
-              required: ['text', 'ymin', 'xmin', 'ymax', 'xmax']
-            }
-          }
-        }
-      }
-    }
-  });
-
-  if (!response.text) return [];
-
-  try {
-    const data = JSON.parse(response.text);
-    const blocks = data.text_blocks || [];
-    return blocks.map((block: any) => ({
-      label: block.text,
-      ymin: block.ymin,
-      xmin: block.xmin,
-      ymax: block.ymax,
-      xmax: block.xmax,
-      type: 'text'
-    }));
-  } catch (e) {
-    console.error("OCR Service Failed", e);
-    return [];
-  }
+  return await runLocalOCR(base64Image, mimeType);
 };
 
 // --- Main Agent Chat Session ---

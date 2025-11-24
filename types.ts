@@ -6,6 +6,7 @@ export interface BoundingBox {
   xmax: number;
   confidence?: number;
   type?: 'object' | 'text';
+  coordinateUnit?: 'pixel' | 'normalized';
 }
 
 export interface DetectionResult {
